@@ -5,18 +5,10 @@ methods {
   function COLLECTOR() external returns(address) envfree;
   function priceChecker() external returns(address) envfree;
   function limitOrderPriceChecker() external returns(address) envfree;
+  function tokenBudget(address token) external returns(uint256) envfree;
+  function owner() external returns(address) envfree;
+  
   function erc20a.balanceOf(address account) external returns (uint256) envfree;
-
-  function _.transfer(address to, uint256 value) external => DISPATCHER(true);
-  function _.transferFrom(address from, address to, uint256 value) external => DISPATCHER(true);
-  function _.approve(address spender, uint256 amount) external => DISPATCHER(true);
-  function _.balanceOf(address account) external => DISPATCHER(true);
-  function _.allowance(address owner, address spender) external => DISPATCHER(true);
-
-  //function _.safeTransfer(address to, uint256 value) external => DISPATCHER(true);
-  //function _.safeTransferFrom(address from, address to, uint256 value) external => DISPATCHER(true);
-  //function _.balanceOf(address usr) external => DISPATCHER(true);
-  //  function _.decimals() external => DISPATCHER(true);
 }
 
 
@@ -25,11 +17,15 @@ methods {
 // *************************************************************************************************
 
 methods {
-  function _.getExpectedOut(uint256 _amountIn, address _fromToken, address _toToken, bytes _data)
-    external => NONDET;
+  // ERC20 functions
+  function _.transfer(address to, uint256 value) external => DISPATCHER(true);
+  function _.transferFrom(address from, address to, uint256 value) external => DISPATCHER(true);
+  function _.approve(address spender, uint256 amount) external => DISPATCHER(true);
+  function _.balanceOf(address account) external => DISPATCHER(true);
+  function _.allowance(address owner, address spender) external => DISPATCHER(true);
 
-  function _.decimals() external => NONDET;
-  
+  function _.getExpectedOut(uint256 _amountIn, address _fromToken, address _toToken, bytes _data)
+    external => NONDET;  
   function _.remove(bytes32) external => NONDET;
   function _.singleOrders(address user, bytes32 _hash) external => NONDET;
   function _.create(IConditionalOrder.ConditionalOrderParams params, bool dispatch) external => NONDET;
@@ -229,41 +225,10 @@ definition is_rescueToken(method f) returns bool =
 
 
 
-rule balanceOf_COLLECTER_doesnt_decrease_by_more_than_amount(method f) filtered {f ->
-    is_swap(f)
-    || is_limitSwap(f)
-    || is_twapSwap(f)
-    }
-{
-  address fromToken; address toToken; uint256 amount; uint256 slippage;
-  uint256 partSellAmount; uint256 minPartLimit; uint256 startTime; uint256 numParts; uint256 partDuration; uint256 span;
-  env e;
-
-  uint256 bal_before = erc20a.balanceOf(COLLECTOR());
-  
-  if (is_swap(f))
-    swap(e, erc20a, toToken, amount, slippage);
-  else if (is_limitSwap(f))
-    limitSwap(e, erc20a, toToken, amount, slippage);
-  else if (is_twapSwap(f)) {
-    twapSwap(e, fromToken, toToken, partSellAmount, minPartLimit, startTime, numParts, partDuration, span);
-  }
-
-  mathint the_amount = is_twapSwap(f) ? partSellAmount * numParts : amount;
-
-  uint256 bal_after = erc20a.balanceOf(COLLECTOR());
-
-  assert bal_after >= bal_before - the_amount;
-}
-
-
-
 rule only_swap_functions_can_decrease_balanceOf_COLLECTER(method f) filtered {f->
     f.contract == currentContract
     }
 {
-  address fromToken; address toToken; uint256 amount; uint256 slippage;
-  uint256 partSellAmount; uint256 minPartLimit; uint256 startTime; uint256 numParts; uint256 partDuration; uint256 span;
   env e;
   calldataarg args;
   
@@ -277,12 +242,42 @@ rule only_swap_functions_can_decrease_balanceOf_COLLECTER(method f) filtered {f-
 }
 
 
+rule balanceOf_COLLECTER_doesnt_decrease_by_more_than_amount(method f) filtered {f ->
+    is_swap(f)
+    || is_limitSwap(f)
+    || is_twapSwap(f)
+    }
+{
+  address fromToken; address toToken; uint256 amount; uint256 slippage;
+  require fromToken == erc20a;
+  uint256 partSellAmount; uint256 minPartLimit; uint256 startTime; uint256 numParts; uint256 partDuration; uint256 span;
+  env e;
+
+  uint256 bal_before = erc20a.balanceOf(COLLECTOR());
+  uint256 budget_before = tokenBudget(fromToken);
+  
+  if (is_swap(f))
+    swap(e, erc20a, toToken, amount, slippage);
+  else if (is_limitSwap(f))
+    limitSwap(e, erc20a, toToken, amount, slippage);
+  else if (is_twapSwap(f)) {
+    twapSwap(e, fromToken, toToken, partSellAmount, minPartLimit, startTime, numParts, partDuration, span);
+  }
+
+  uint256 bal_after = erc20a.balanceOf(COLLECTOR());
+  uint256 budget_after = tokenBudget(fromToken);
+  mathint the_amount = is_twapSwap(f) ? partSellAmount * numParts : amount;
+  assert bal_after >= bal_before - the_amount;
+
+  mathint diff_in_bal = bal_before - bal_after;
+  assert e.msg.sender != owner() => budget_before-budget_after==diff_in_bal;
+}
+
 
 rule only_cancel_functions_can_increase_balanceOf_COLLECTER(method f) filtered {f->
     f.contract == currentContract
     }
 {
-  address fromToken; address toToken; uint256 amount; uint256 slippage;
   uint256 partSellAmount; uint256 minPartLimit; uint256 startTime; uint256 numParts; uint256 partDuration; uint256 span;
   env e;
   calldataarg args;
@@ -297,6 +292,42 @@ rule only_cancel_functions_can_increase_balanceOf_COLLECTER(method f) filtered {
 }
 
 
+rule balanceOf_COLLECTER_increase_decrease_by_more_than_amount(method f) filtered {f ->
+    is_cancelSwap(f)
+    || is_cancelLimitSwap(f)
+    || is_cancelTwapSwap(f)
+    }
+{
+  address tradeMilkman; address fromToken; address toToken; uint256 amount; uint256 slippage;
+  require fromToken == erc20a;
+  uint256 partSellAmount; uint256 minPartLimit; uint256 startTime; uint256 numParts; uint256 partDuration; uint256 span;
+  uint256 executedParts;
+  env e;
+
+  uint256 bal_before = erc20a.balanceOf(COLLECTOR());
+  uint256 budget_before = tokenBudget(fromToken);
+  
+  if (is_swap(f))
+    cancelSwap(e, tradeMilkman, erc20a, toToken, amount, slippage);
+  else if (is_limitSwap(f))
+    cancelLimitSwap(e, tradeMilkman, erc20a, toToken, amount, slippage);
+  else if (is_twapSwap(f)) {
+    cancelTwapSwap(e, fromToken, toToken, partSellAmount, minPartLimit, startTime, numParts, partDuration, span, executedParts);
+  }
+
+  uint256 bal_after = erc20a.balanceOf(COLLECTOR());
+  uint256 budget_after = tokenBudget(fromToken);
+  mathint the_amount = is_cancelTwapSwap(f) ? executedParts * numParts : amount;
+  assert bal_after <= bal_before + the_amount;
+
+  mathint diff_in_bal = bal_before - bal_after;
+  assert e.msg.sender != owner() => budget_before-budget_after==diff_in_bal;
+}
+
+
+
+
+
 
 
 
@@ -306,16 +337,28 @@ rule only_cancel_functions_can_increase_balanceOf_COLLECTER(method f) filtered {
 
 
 rule temp() {
-  address tradeMilkman; address fromToken; address toToken; uint256 amount; uint256 slippage;
-  env e;   calldataarg args;
+  address fromToken; address toToken; uint256 amount; uint256 slippage;
+  require fromToken == erc20a;
+  uint256 partSellAmount; uint256 minPartLimit; uint256 startTime; uint256 numParts; uint256 partDuration; uint256 span;
+  env e;
+
+  uint256 bal_before = erc20a.balanceOf(COLLECTOR());
+  uint256 budget_before = tokenBudget(fromToken);
+
+
 
   
-  uint256 bal_before = erc20a.balanceOf(COLLECTOR());
-
-  cancelTwapSwap(e, args);
+  require bal_before == 100;
+  require budget_before == 100;
+  
+  swap(e, erc20a, toToken, amount, slippage);
 
   uint256 bal_after = erc20a.balanceOf(COLLECTOR());
+  uint256 budget_after = tokenBudget(fromToken);
+  mathint the_amount = amount;
+  assert bal_after >= bal_before - the_amount;
 
-  assert bal_after >= bal_before;
+  mathint diff_in_bal = bal_before - bal_after;
+  assert e.msg.sender != owner() => budget_before-budget_after==diff_in_bal;
 }
 
