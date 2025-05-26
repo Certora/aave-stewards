@@ -1,0 +1,399 @@
+
+using ERC20A as erc20a;
+
+methods {
+  function COLLECTOR() external returns(address) envfree;
+  function priceChecker() external returns(address) envfree;
+  function limitOrderPriceChecker() external returns(address) envfree;
+  function tokenBudget(address token) external returns(uint256) envfree;
+  function owner() external returns(address) envfree;
+  
+  function erc20a.balanceOf(address account) external returns (uint256) envfree;
+}
+
+
+// *************************************************************************************************
+// Summarizations
+// *************************************************************************************************
+
+methods {
+  // ERC20 functions
+  function _.transfer(address to, uint256 value) external => DISPATCHER(true);
+  function _.transferFrom(address from, address to, uint256 value) external => DISPATCHER(true);
+  function _.approve(address spender, uint256 amount) external => DISPATCHER(true);
+  function _.balanceOf(address account) external => DISPATCHER(true);
+  function _.allowance(address owner, address spender) external => DISPATCHER(true);
+
+  function _.getExpectedOut(uint256 _amountIn, address _fromToken, address _toToken, bytes _data)
+    external => NONDET;  
+  function _.remove(bytes32) external => NONDET;
+  function _.singleOrders(address user, bytes32 _hash) external => NONDET;
+  function _.create(IConditionalOrder.ConditionalOrderParams params, bool dispatch) external => NONDET;
+
+  function _.cancelSwap(uint256 amountIn,
+                        address fromToken,
+                        address toToken,
+                        address to,
+                        bytes32 appData,
+                        address priceChecker,
+                        bytes priceCheckerData
+                       ) external
+    => CVL_cancelSwap(calledContract/*tradeMilkman*/, amountIn, fromToken, toToken, to, priceChecker) expect void;
+  
+  function _.requestSwapExactTokensForTokens(uint256 amountIn,
+                                             address fromToken,
+                                             address toToken,
+                                             address to,
+                                             bytes32 appData,
+                                             address priceChecker,
+                                             bytes  priceCheckerData
+                                            ) external
+    => CVL_requestSwapExactTokensForTokens(amountIn,fromToken,toToken,to,priceChecker) expect void;
+}
+
+
+persistent ghost address __cancelSwap_PRM_tradeMilkman;
+persistent ghost uint256 __cancelSwap_PRM_amountIn;
+persistent ghost address __cancelSwap_PRM_fromToken;
+persistent ghost address __cancelSwap_PRM_toToken;
+persistent ghost address __cancelSwap_PRM_to;
+persistent ghost address __cancelSwap_PRM_priceChecker;
+
+function CVL_cancelSwap(address tradeMilkman,
+                        uint256 amountIn,
+                        address fromToken,
+                        address toToken,
+                        address to,
+                        address priceChecker
+                       ) {
+  __cancelSwap_PRM_tradeMilkman = tradeMilkman;
+  __cancelSwap_PRM_amountIn = amountIn;
+  __cancelSwap_PRM_fromToken = fromToken;
+  __cancelSwap_PRM_toToken = toToken;
+  __cancelSwap_PRM_to = to;
+  __cancelSwap_PRM_priceChecker = priceChecker;
+}
+
+
+
+
+persistent ghost uint256 __requestSwap_PRM_amountIn;
+persistent ghost address __requestSwap_PRM_fromToken;
+persistent ghost address __requestSwap_PRM_toToken;
+persistent ghost address __requestSwap_PRM_to;
+persistent ghost address __requestSwap_PRM_priceChecker;
+
+function CVL_requestSwapExactTokensForTokens(uint256 amountIn,
+                                            address fromToken,
+                                            address toToken,
+                                            address to,
+                                            address priceChecker) {
+  __requestSwap_PRM_amountIn = amountIn;
+  __requestSwap_PRM_fromToken = fromToken;
+  __requestSwap_PRM_toToken = toToken;
+  __requestSwap_PRM_to = to;
+  __requestSwap_PRM_priceChecker = priceChecker;
+}
+
+
+
+
+// ======================================================================================
+// DEFINITIONS
+// ======================================================================================
+
+definition is_swap(method f) returns bool =
+  f.selector == sig:swap(address,address,uint256,uint256).selector;
+definition is_limitSwap(method f) returns bool =
+  f.selector == sig:limitSwap(address,address,uint256,uint256).selector;
+definition is_twapSwap(method f) returns bool =
+  f.selector == sig:twapSwap(address,address,uint256,uint256,uint256,uint256,uint256,uint256).selector;
+
+definition is_cancelSwap(method f) returns bool =
+  f.selector == sig:cancelSwap(address,address,address,uint256,uint256).selector;
+definition is_cancelLimitSwap(method f) returns bool =
+  f.selector == sig:cancelLimitSwap(address,address,address,uint256,uint256).selector;
+definition is_cancelTwapSwap(method f) returns bool =
+  f.selector == sig:cancelTwapSwap(address,address,uint256,uint256,uint256,uint256,uint256,uint256,uint256).selector;
+
+definition is_rescueToken(method f) returns bool =
+  f.selector == sig:rescueToken(address).selector;
+
+
+
+// ======================================================================================
+// Rule: only_swap_functions_can_decrease_balOf_COLLECTER
+// Description: Only the swap-functions can cause the fromToken.balanceOf(COLLECTOR) to
+//              decrease. The swap-functions are: swap(..), limitSwap(..), and twapSwap(..).
+// Status: PASS
+// ======================================================================================
+rule only_swap_func_can_decrease_balOf_COLLECTER(method f) filtered {f->
+    f.contract == currentContract
+    }
+{
+  env e;
+  calldataarg args;
+  
+  uint256 bal_before = erc20a.balanceOf(COLLECTOR());
+
+  f(e,args);
+
+  uint256 bal_after = erc20a.balanceOf(COLLECTOR());
+
+  assert bal_after < bal_before => (is_swap(f) || is_limitSwap(f) || is_twapSwap(f));
+}
+
+
+// ======================================================================================
+// Rule: balOf_COLLECTER_and_budget_integrity__swap
+// Description: When calling one of the swap-functions (which are swap(..), limitSwap(..),
+//              and twapSwap(..)) the rule checks that:
+//              - fromToken.balanceOf(COLLECTOR) cant be decreased by more than the
+//                amount of money that was intended to be swaped
+//              - If the called is not the owner, the difference of fromToken.balanceOf(COLLECTOR)
+//                (before and after the call) equals to the difference of tokenBudget[fromToken]
+// Status: PASS
+// ======================================================================================
+rule balOf_COLLECTER_and_budget_integrity__swap(method f) filtered {f ->
+    is_swap(f)
+    || is_limitSwap(f)
+    || is_twapSwap(f)
+    }
+{
+  address fromToken; address toToken; uint256 amount; uint256 slippage;
+  require fromToken == erc20a;
+  uint256 partSellAmount; uint256 minPartLimit; uint256 startTime; uint256 numParts; uint256 partDuration; uint256 span;
+  env e;
+
+  uint256 bal_before = erc20a.balanceOf(COLLECTOR());
+  uint256 budget_before = tokenBudget(fromToken);
+  
+  if (is_swap(f))
+    swap(e, erc20a, toToken, amount, slippage);
+  else if (is_limitSwap(f))
+    limitSwap(e, erc20a, toToken, amount, slippage);
+  else if (is_twapSwap(f)) {
+    twapSwap(e, fromToken, toToken, partSellAmount, minPartLimit, startTime, numParts, partDuration, span);
+  }
+
+  uint256 bal_after = erc20a.balanceOf(COLLECTOR());
+  uint256 budget_after = tokenBudget(fromToken);
+  mathint the_amount = is_twapSwap(f) ? partSellAmount * numParts : amount;
+  assert bal_after >= bal_before - the_amount;
+
+  mathint diff_in_bal = bal_before - bal_after;
+  assert e.msg.sender != owner() => budget_before-budget_after==diff_in_bal;
+}
+
+
+// ======================================================================================
+// Rule: only_cancel_func_can_increase_balOf_COLLECTER
+// Description: Only the cancel-functions and rescueToken() can cause the fromToken.balanceOf(COLLECTOR)
+//              to increase. The cancel-functions are: cancelSwap(..), cancelLimitSwap(..),
+//              and cancelTwapSwap(..).
+// Status: PASS
+// ======================================================================================
+rule only_cancel_func_can_increase_balOf_COLLECTER(method f) filtered {f->
+    f.contract == currentContract
+    }
+{
+  uint256 partSellAmount; uint256 minPartLimit; uint256 startTime; uint256 numParts; uint256 partDuration; uint256 span;
+  env e;
+  calldataarg args;
+  
+  uint256 bal_before = erc20a.balanceOf(COLLECTOR());
+
+  f(e,args);
+
+  uint256 bal_after = erc20a.balanceOf(COLLECTOR());
+
+  assert bal_after > bal_before => (is_cancelSwap(f) || is_cancelLimitSwap(f) || is_cancelTwapSwap(f) || is_rescueToken(f));
+}
+
+
+// ======================================================================================
+// Rule: balOf_COLLECTER_and_budget_integrity__cancel
+// Description: When calling one of the cancel-functions (which are cancelSwap(..),
+//              cancelLimitSwap(..), and cancelTwapSwap(..)) the rule checks that:
+//              - fromToken.balanceOf(COLLECTOR) cant be increase by more than the
+//                amount of money that was intended to be swaped.
+//              - If the called is not the owner, the difference of fromToken.balanceOf(COLLECTOR)
+//                (before and after the call) equals to the difference of tokenBudget[fromToken]
+// Status: PASS
+// ======================================================================================
+rule balOf_COLLECTER_and_budget_integrity__cancel(method f) filtered {f ->
+    is_cancelSwap(f)
+    || is_cancelLimitSwap(f)
+    || is_cancelTwapSwap(f)
+    }
+{
+  address tradeMilkman; address fromToken; address toToken; uint256 amount; uint256 slippage;
+  require fromToken == erc20a;
+  uint256 partSellAmount; uint256 minPartLimit; uint256 startTime; uint256 numParts; uint256 partDuration; uint256 span;
+  uint256 executedParts;
+  env e;
+
+  uint256 bal_before = erc20a.balanceOf(COLLECTOR());
+  uint256 budget_before = tokenBudget(fromToken);
+  
+  if (is_swap(f))
+    cancelSwap(e, tradeMilkman, erc20a, toToken, amount, slippage);
+  else if (is_limitSwap(f))
+    cancelLimitSwap(e, tradeMilkman, erc20a, toToken, amount, slippage);
+  else if (is_twapSwap(f)) {
+    cancelTwapSwap(e, fromToken, toToken, partSellAmount, minPartLimit, startTime, numParts, partDuration, span, executedParts);
+  }
+
+  uint256 bal_after = erc20a.balanceOf(COLLECTOR());
+  uint256 budget_after = tokenBudget(fromToken);
+  mathint the_amount = is_cancelTwapSwap(f) ? executedParts * numParts : amount;
+  assert bal_after <= bal_before + the_amount;
+
+  mathint diff_in_bal = bal_before - bal_after;
+  assert e.msg.sender != owner() => budget_before-budget_after==diff_in_bal;
+}
+
+
+
+
+
+// ======================================================================================
+// Rule: requestSwapExactTokensForTokens_params__swap
+// Description: When calling to the swap(..) function, it calls to the function
+//              IMilkman.requestSwapExactTokensForTokens(..). The rule checks the validity of the
+//              following parameters of IMilkman.requestSwapExactTokensForTokens(..):
+//              - fromToken: same as fromToken of swap().
+//              - toToken: same as toToken of swap().
+//              - amount: less or equal to the amount param of swap(..).
+//              - to: must be the COLLECTOR.
+//              - priceChecker: must be as the storage variable priceChecker.
+// Status: PASS
+// ======================================================================================
+rule requestSwapExactTokensForTokens_params__swap() {
+  __requestSwap_PRM_amountIn = 0;
+  __requestSwap_PRM_fromToken = 0;
+  __requestSwap_PRM_toToken = 0;
+  __requestSwap_PRM_to = 0;
+  __requestSwap_PRM_priceChecker = 0;
+  
+  address fromToken; address toToken; uint256 amount; uint256 slippage;
+  env e;
+
+  swap(e, fromToken, toToken, amount, slippage);
+
+  assert __requestSwap_PRM_amountIn <= amount;
+  assert __requestSwap_PRM_fromToken == fromToken;
+  assert __requestSwap_PRM_toToken == toToken;
+  assert __requestSwap_PRM_to == COLLECTOR();
+  assert __requestSwap_PRM_priceChecker == priceChecker();
+}
+
+
+// ======================================================================================
+// Rule: requestSwapExactTokensForTokens_params__limitSwap
+// Description: When calling to the limitSwap(..) function, it calls to the function
+//              IMilkman.requestSwapExactTokensForTokens(..). The rule checks the validity of the
+//              following parameters of IMilkman.requestSwapExactTokensForTokens(..):
+//              - fromToken: same as fromToken of limitSwap().
+//              - toToken: same as toToken of limitSwap().
+//              - amount: less or equal to the amount param of limitSwap(..).
+//              - to: must be the COLLECTOR.
+//              - priceChecker: must be as the storage variable limitOrderPriceChecker.
+// Status: PASS
+// ======================================================================================
+rule requestSwapExactTokensForTokens_params__limitSwap() {
+  __requestSwap_PRM_amountIn = 0;
+  __requestSwap_PRM_fromToken = 0;
+  __requestSwap_PRM_toToken = 0;
+  __requestSwap_PRM_to = 0;
+  __requestSwap_PRM_priceChecker = 0;
+  
+  address fromToken; address toToken; uint256 amount; uint256 amountOut;
+  env e;
+
+  limitSwap(e, fromToken, toToken, amount, amountOut);
+
+  assert __requestSwap_PRM_amountIn <= amount;
+  assert __requestSwap_PRM_fromToken == fromToken;
+  assert __requestSwap_PRM_toToken == toToken;
+  assert __requestSwap_PRM_to == COLLECTOR();
+  assert __requestSwap_PRM_priceChecker == limitOrderPriceChecker();
+}
+
+
+// ======================================================================================
+// Rule: cancelSwap_params_correctness__cancelSwap
+// Description: When calling to the cancelSwap(..) function, it calls to the function
+//              IMilkman.cancelSwap(..). The rule checks the validity of the
+//              following parameters of IMilkman.cancelSwap(..):
+//              - tradeMilkman: same as tradeMilkman of cancelSwap().
+//              - fromToken: same as fromToken of cancelSwap().
+//              - toToken: same as toToken of cancelSwap().
+//              - amount: same as amount of cancelSwap().
+//              - to: must be the COLLECTOR.
+//              - priceChecker: must be as the storage variable priceChecker.
+// Status: PASS
+// ======================================================================================
+rule cancelSwap_params_correctness__cancelSwap() {
+  __cancelSwap_PRM_tradeMilkman = 0;
+  __cancelSwap_PRM_amountIn = 0;
+  __cancelSwap_PRM_fromToken = 0;
+  __cancelSwap_PRM_toToken = 0;
+  __cancelSwap_PRM_to = 0;
+  __cancelSwap_PRM_priceChecker = 0;
+  
+  address tradeMilkman; address fromToken; address toToken; uint256 amount; uint256 slippage;
+  env e;
+
+  cancelSwap(e, tradeMilkman, fromToken, toToken, amount, slippage);
+
+  assert __cancelSwap_PRM_tradeMilkman == tradeMilkman;
+  assert __cancelSwap_PRM_amountIn == amount;
+  assert __cancelSwap_PRM_fromToken == fromToken;
+  assert __cancelSwap_PRM_toToken == toToken;
+  assert __cancelSwap_PRM_to == COLLECTOR();
+  assert __cancelSwap_PRM_priceChecker == priceChecker();
+}
+
+
+
+// ======================================================================================
+// Rule: cancelSwap_params_correctness__cancelLimitSwap
+// Description: When calling to the cancelLimitSwap(..) function, it calls to the function
+//              IMilkman.cancelSwap(..). The rule checks the validity of the
+//              following parameters of IMilkman.cancelSwap(..):
+//              - tradeMilkman: same as tradeMilkman of cancelLimitSwap().
+//              - fromToken: same as fromToken of cancelLimitSwap().
+//              - toToken: same as toToken of cancelLimitSwap().
+//              - amount: same as amount of cancelLimitSwap().
+//              - to: must be the COLLECTOR.
+//              - priceChecker: must be as the storage variable limitOrderPriceChecker.
+// Status: PASS
+// ======================================================================================
+rule cancelSwap_params_correctness__cancelLimitSwap() {
+  __cancelSwap_PRM_tradeMilkman = 0;
+  __cancelSwap_PRM_amountIn = 0;
+  __cancelSwap_PRM_fromToken = 0;
+  __cancelSwap_PRM_toToken = 0;
+  __cancelSwap_PRM_to = 0;
+  __cancelSwap_PRM_priceChecker = 0;
+  
+  address tradeMilkman; address fromToken; address toToken; uint256 amount; uint256 amountOut;
+  env e;
+
+  cancelLimitSwap(e, tradeMilkman, fromToken, toToken, amount, amountOut);
+
+  assert __cancelSwap_PRM_tradeMilkman == tradeMilkman;
+  assert __cancelSwap_PRM_amountIn == amount;
+  assert __cancelSwap_PRM_fromToken == fromToken;
+  assert __cancelSwap_PRM_toToken == toToken;
+  assert __cancelSwap_PRM_to == COLLECTOR();
+  assert __cancelSwap_PRM_priceChecker == limitOrderPriceChecker();
+}
+
+
+
+
+
+
+
