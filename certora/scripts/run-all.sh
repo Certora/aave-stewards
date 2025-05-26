@@ -3,6 +3,6 @@
 
 
 echo
-echo "1: "
-certoraRun $CMN  certora/conf/.conf \
-            --msg "1. .conf"
+echo "1: rules.conf"
+certoraRun $CMN  certora/conf/rules.conf \
+            --msg "1. rules.conf"
